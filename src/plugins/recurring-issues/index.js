@@ -5,7 +5,22 @@
 
 "use strict";
 
+//-----------------------------------------------------------------------------
+// Requirements
+//-----------------------------------------------------------------------------
+
 const moment = require("moment-timezone");
+
+//-----------------------------------------------------------------------------
+// Type Definitions
+//-----------------------------------------------------------------------------
+
+/** @typedef {import("probot").Context} ProbotContext */
+/** @typedef {import("probot").ProbotOctokit} ProbotOctokit */
+
+//-----------------------------------------------------------------------------
+// Helpers
+//-----------------------------------------------------------------------------
 
 /**
  * Gets the desired issue body for a release issue, given the date of the release.
@@ -21,8 +36,14 @@ The next scheduled release will occur on ${releaseDate.format("dddd, MMMM Do, YY
 
 - [ ] Remove the 'tsc agenda' label on this issue
 - [ ] Review open pull requests and merge any that are [ready](https://eslint.org/docs/maintainer-guide/pullrequests#when-to-merge-a-pull-request)
-- [ ] Start the release on [Jenkins](https://jenkins.eslint.org)
-- [ ] Update the release blog post with a "Highlights" section
+- [ ] Verify if there are other packages (i.e., \`espree\`, \`eslint-scope\`, \`eslint-visitor-keys\`, \`@eslint/eslintrc\`) that need to be released first
+- [ ] Release \`@eslint/js\` to match the upcoming \`eslint\` version in [Jenkins](https://jenkins2.eslint.org)
+- [ ] Update \`package.json\` in the \`eslint\` repo with new versions from the preceding steps (create and merge a pull request)
+- [ ] Start the release on [Jenkins](https://jenkins2.eslint.org)
+- [ ] Update the release blog post:
+    - [ ] Add a "Highlights" section for any noteworthy changes.
+    - [ ] In the \`authors\` frontmatter, replace \`eslintbot\` with your GitHub username.
+    - [ ] Remove the \`draft: true\` line in frontmatter.
 - [ ] Make a release announcement on Twitter
 - [ ] Make a release announcement in the Discord '#announcements' channel
 - [ ] Add a comment to this issue saying the release is out
@@ -42,8 +63,11 @@ Typically Monday for regular releases; two days after patch releases.
 ## Patch Release Checklist
 
 - [ ] Resolve the regression by merging any necessary fixes
-- [ ] Start the release on [Jenkins](https://jenkins.eslint.org)
-- [ ] Update the release blog post with a "Highlights" section
+- [ ] Start the release on [Jenkins](https://jenkins2.eslint.org)
+- [ ] Update the release blog post:
+    - [ ] Add a "Highlights" section for any noteworthy changes.
+    - [ ] In the \`authors\` frontmatter, replace \`eslintbot\` with your GitHub username.
+    - [ ] Remove the \`draft: true\` line in frontmatter.
 - [ ] Make a release announcement on Twitter
 - [ ] Make a release announcement in the Discord '#announcements' channel
 - [ ] Add a comment to this issue saying the release is out
@@ -62,29 +86,32 @@ Resources:
 }
 
 /**
- * Gets the members of a particular team on GitHub
- * @param {GitHub} github A GitHub API client
+ * Gets the members of a particular team on GitHub.
+ * @param {Object} options The options to use for this function.
+ * @param {ProbotOctokit} options.octokit A GitHub API client.
+ * @param {string} options.organizationName The name of the organization that owns the team.
+ * @param {string} options.teamName The name of the team.
  * @returns {{login: string, name: (string|null)}} A list of team member login names and full names
  */
-async function getTeamMembers({ github, organizationName, teamName }) {
+async function getTeamMembers({ octokit, organizationName, teamName }) {
 
     /*
      * NOTE: This will fail if the organization contains more than 100 teams. This isn't
      * close to being a problem right now, so it hasn't been worth figuring out a good
      * way to paginate yet, but that would be a good enhancement in the future.
      */
-    const teams = await github.teams.list({ org: organizationName, per_page: 100 }).then(res => res.data);
+    const teams = await octokit.teams.list({ org: organizationName, per_page: 100 }).then(res => res.data);
     const desiredTeam = teams.find(team => team.slug === teamName);
 
     if (!desiredTeam) {
         throw new Error(`No team with name ${teamName} found`);
     }
 
-    const teamMembers = await github.teams.listMembers({ team_id: desiredTeam.id, per_page: 100 }).then(res => res.data);
+    const teamMembers = await octokit.teams.listMembersInOrg({ team_slug: desiredTeam.slug, org: organizationName, per_page: 100 }).then(res => res.data);
 
     return Promise.all(teamMembers.map(async member => ({
         login: member.login,
-        name: await github.users.getById({ id: member.id }).then(res => res.data.name)
+        name: await octokit.users.getByUsername({ username: member.login }).then(res => res.data.name)
     })));
 }
 
@@ -99,11 +126,14 @@ function formatTeamMembers(teamMembers) {
 
 /**
  * Gets the desired issue body for a release issue, given the date and of the meeting
- * @param {Moment} meetingDate The date and time when the meeting will take place, as a Moment date
- * @param {GitHub} github A GitHub API client
+ * @param {Object} options Configure the issue body
+ * @param {Moment} options.meetingDate The date and time when the meeting will take place, as a Moment date
+ * @param {GitHub} options.octokit A GitHub API client for fetching TSC team members
+ * @param {string} options.organizationName The name of the organization that owns the TSC team
+ * @param {string} options.tscTeamName The name of the TSC team
  * @returns {Promise<string>} The text of the issue
  */
-async function getTscMeetingIssueBody({ meetingDate, github, organizationName, tscTeamName }) {
+async function getTscMeetingIssueBody({ meetingDate, octokit, organizationName, tscTeamName }) {
     const timeFormatString = "ddd DD-MMM-YYYY HH:mm";
 
     return `
@@ -132,7 +162,7 @@ Extracted from:
 
 # Invited
 
-${await getTeamMembers({ github, organizationName, teamName: tscTeamName }).then(formatTeamMembers)}
+${await getTeamMembers({ octokit, organizationName, teamName: tscTeamName }).then(formatTeamMembers)}
 
 # Public participation
 
@@ -141,37 +171,40 @@ Anyone is welcome to attend the meeting as observers. We ask that you refrain fr
     `.trim();
 }
 
+/* eslint-disable camelcase -- issue_number is part of the GitHub API response */
 /**
  * A function that determines whether an issue on GitHub was closed multiple times in the past.
- * @param {GitHub} github A GitHub API client
+ * @param {ProbotOctokit} octokit A GitHub API client
  * @param {Object} issueInfo information about the issue
  * @param {string} issueInfo.owner The owner of the repository
  * @param {string} issueInfo.repo The repo name
- * @param {number} issueInfo.number The issue number on GitHub
+ * @param {number} issueInfo.issue_number The issue number on GitHub
  * @returns {Promise<boolean>} A Promise that fulfills with `true` if the issue was closed multiple times
  */
-async function issueWasClosedMultipleTimes(github, { owner, repo, number }) {
-    const issueEvents = await github.issues.listEvents({
+async function issueWasClosedMultipleTimes(octokit, { owner, repo, issue_number }) {
+    const issueEvents = await octokit.issues.listEvents({
         owner,
         repo,
-        number,
+        issue_number,
         per_page: 100
     }).then(res => res.data);
 
     return issueEvents.filter(eventObj => eventObj.event === "closed").length > 1;
 }
+/* eslint-enable camelcase -- issue_number is part of the GitHub API response */
 
 /**
  * Creates a webhook handler that responds when an issue is closed for the first time
  * by creating a new issue.
- * @param {string} labelTrigger A label that the closed issue must have for this webhook
+ * @param {Object} options Configure the webhook handler
+ * @param {string} options.labelTrigger A label that the closed issue must have for this webhook
  * to run
- * @param {string[]} newLabels The labels that the newly-created issue should be given
- * @param {Function} shouldCreateNewIssue A function that accepts an object with `title` and
+ * @param {string[]} options.newLabels The labels that the newly-created issue should be given
+ * @param {Function} options.shouldCreateNewIssue A function that accepts an object with `title` and
  * `body` properties as an argument, and returns a Promise for a boolean indicating whether
  * a new issue should be created. If the Promise fulfills with `false`, creating a new issue
  * will be cancelled.
- * @param {Function} getNewIssueInfo A function to get the title and body of the new issue.
+ * @param {Function} options.getNewIssueInfo A function to get the title and body of the new issue.
  * Accepts a single parameter with `title` and `body` properties for the old issue, as well as
  * a `github` property containing a GitHub API client and an `organizationName` property containing
  * the name of the organization that owns the repo where the issue was filed. Returns a promise
@@ -179,6 +212,12 @@ async function issueWasClosedMultipleTimes(github, { owner, repo, number }) {
  * @returns {function(probot.Context): Promise<void>} A Probot event listener
  */
 function createIssueHandler({ labelTrigger, newLabels, shouldCreateNewIssue, getNewIssueInfo }) {
+
+    /**
+     * A Probot event listener that creates a new issue when an old issue is closed.
+     * @param {ProbotContext} context A Probot context object
+     * @returns {Promise<void>} A Promise that fulfills when the new issue is created.
+     */
     return async context => {
         const { title: oldTitle, body: oldBody, labels: oldLabels } = context.payload.issue;
 
@@ -188,7 +227,7 @@ function createIssueHandler({ labelTrigger, newLabels, shouldCreateNewIssue, get
         }
 
         // If the issue was previously closed and then reopened, skip it.
-        if (await issueWasClosedMultipleTimes(context.github, context.issue())) {
+        if (await issueWasClosedMultipleTimes(context.octokit, context.issue())) {
             return;
         }
 
@@ -199,12 +238,12 @@ function createIssueHandler({ labelTrigger, newLabels, shouldCreateNewIssue, get
         const { title: newTitle, body: newBody } = await getNewIssueInfo({
             title: oldTitle,
             body: oldBody,
-            github: context.github,
+            octokit: context.octokit,
             organizationName: context.repo().owner
         });
 
         // Create a new issue.
-        await context.github.issues.create(
+        await context.octokit.issues.create(
             context.repo({
                 title: newTitle,
                 body: newBody,
@@ -239,7 +278,7 @@ const tscMeetingIssueHandler = createIssueHandler({
     async shouldCreateNewIssue({ title }) {
         return moment.utc(title, TSC_MEETING_TITLE_FORMAT, true).isValid();
     },
-    async getNewIssueInfo({ title, github, organizationName }) {
+    async getNewIssueInfo({ title, octokit, organizationName }) {
         const meetingDate = moment.tz(title, TSC_MEETING_TITLE_FORMAT, "America/New_York")
             .hour(16)
             .add({ weeks: 2 });
@@ -248,7 +287,7 @@ const tscMeetingIssueHandler = createIssueHandler({
         const newTitle = meetingDate.format(TSC_MEETING_TITLE_FORMAT);
         const newBody = await getTscMeetingIssueBody({
             meetingDate,
-            github,
+            octokit,
             organizationName,
             tscTeamName: "eslint-tsc"
         });

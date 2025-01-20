@@ -11,12 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Cloning repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
       - name: Push to dokku
         uses: dokku/github-action@master
         with:
+          branch: main
           git_remote_url: 'ssh://dokku@github-bot.eslint.org/eslint-github-bot'
           ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}

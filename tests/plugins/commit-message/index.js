@@ -2,63 +2,114 @@
 
 const { commitMessage } = require("../../../src/plugins/index");
 const { TAG_LABELS } = require("../../../src/plugins/commit-message/util");
-const nock = require("nock");
-const probot = require("probot");
-const GitHubApi = require("@octokit/rest");
+const { Probot, ProbotOctokit } = require("probot");
+const { default: fetchMock } = require("fetch-mock");
+
+const API_ROOT = "https://api.github.com";
 
 /**
  * Mocks a given commit on a PR with the specified message
  * @param {string} message The commit message
  * @returns {void}
  */
-function mockSingleCommitWithMessage(message) {
-    nock("https://api.github.com")
-        .get("/repos/test/repo-test/pulls/1/commits")
-        .reply(200, [
-            {
-                commit: {
-                    message
-                },
-                sha: "first-sha"
-            }
-        ]);
-}
+// function mockSingleCommitWithMessage(message) {
+//     nock("https://api.github.com")
+//         .get("/repos/test/repo-test/pulls/1/commits")
+//         .reply(200, [
+//             {
+//                 commit: {
+//                     message
+//                 },
+//                 sha: "first-sha"
+//             }
+//         ]);
+// }
 
 /**
  * Mocks a labels request.
  * @param {Array<string>} labels The labels to check for on the PR.
  * @returns {Nock} The mock for the labels request.
  */
-function mockLabels(labels) {
-    return nock("https://api.github.com")
-        .post("/repos/test/repo-test/issues/1/labels", body => {
-            expect(body).toEqual({ labels });
-            return true;
-        })
-        .reply(200);
-}
+// function mockLabels(labels) {
+//     return nock("https://api.github.com")
+//         .post("/repos/test/repo-test/issues/1/labels", body => {
+//             expect(body).toEqual({ labels });
+//             return true;
+//         })
+//         .reply(200);
+// }
 
 /**
  * Mocks multiple commits on a PR
  * @returns {void}
  */
-function mockMultipleCommits() {
-    nock("https://api.github.com")
-        .get("/repos/test/repo-test/pulls/1/commits")
-        .reply(200, [
-            {
-                commit: {
-                    message: "foo"
-                },
-                sha: "first-sha"
+// function mockMultipleCommits() {
+//     nock("https://api.github.com")
+//         .get("/repos/test/repo-test/pulls/1/commits")
+//         .reply(200, [
+//             {
+//                 commit: {
+//                     message: "foo"
+//                 },
+//                 sha: "first-sha"
+//             },
+//             {
+//                 commit: {
+//                     message: "bar"
+//                 },
+//                 sha: "second-sha"
+//             }
+//         ]);
+// }
+
+/**
+ * Mocks a given commit on a PR with the specified message using fetchMock
+ * @param {string} message The commit message
+ * @returns {void}
+ */
+function mockSingleCommitWithMessage(message) {
+    fetchMock.mockGlobal().get(`${API_ROOT}/repos/test/repo-test/pulls/1/commits`, [
+        {
+            commit: {
+                message
             },
-            {
-                commit: {
-                    message: "bar"
-                },
-                sha: "second-sha"
-            }
-        ]);
+            sha: "first-sha"
+        }
+    ]);
+}
+
+/**
+ * Mocks a labels request using fetchMock.
+ * @param {Array<string>} labels The labels to check for on the PR.
+ * @returns {void}
+ */
+function mockLabels(labels) {
+    fetchMock.mockGlobal().post({
+        url: `${API_ROOT}/repos/test/repo-test/issues/1/labels`,
+        body: { labels },
+        matchPartialBody: true
+    }, 200);
+}
+
+/**
+ * Mocks multiple commits on a PR using fetchMock
+ * @returns {void}
+ */
+function mockMultipleCommits() {
+    fetchMock.mockGlobal().get(`${API_ROOT}/repos/test/repo-test/pulls/1/commits`, [
+        {
+            commit: {
+                message: "foo"
+            },
+            sha: "first-sha"
+        },
+        {
+            commit: {
+                message: "bar"
+            },
+            sha: "second-sha"
+        }
+    ]);
 }
 
 /**
@@ -97,157 +148,269 @@ describe("commit-message", () => {
     let bot = null;
 
     beforeAll(() => {
-        bot = new probot.Application({
-            id: "test",
-            cert: "test",
-            cache: {
-                wrap: () => Promise.resolve({ data: { token: "test" } })
-            }
+        bot = new Probot({
+
+            appId: 1,
+            githubToken: "test",
+
+            Octokit: ProbotOctokit.defaults(instanceOptions => ({
+                ...instanceOptions,
+                throttle: { enabled: false },
+                retry: { enabled: false }
+            }))
         });
-        bot.auth = () => new GitHubApi();
         commitMessage(bot);
     });
 
-    beforeEach(() => {
-        nock.disableNetConnect();
-    });
-
     afterEach(() => {
-        nock.cleanAll();
+        fetchMock.unmockGlobal();
+        fetchMock.removeRoutes();
+        fetchMock.clearHistory();
     });
 
     ["opened", "reopened", "synchronize", "edited"].forEach(action => {
         describe(`pull request ${action}`, () => {
-            test("Posts failure status if commit message is not correct", async() => {
+            test("Posts failure status if PR title is not correct", async () => {
                 mockSingleCommitWithMessage("non standard commit message");
 
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "failure")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                    body: {
+                        state: "failure"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                const nockScope2 = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/issues/1/comments", req => {
-                        expect(req.body).toMatchSnapshot();
-                        return true;
-                    })
-                    .reply(200);
+                fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                    if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                        return false;
+                    }
+                    const body = JSON.parse(opts.body).body;
 
-                await emitBotEvent(bot, { action });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(nockScope2.isDone()).toBeTruthy();
+                    expect(body).toMatchSnapshot();
+
+                    return true;
+                }, 200);
+
+                await emitBotEvent(bot, {
+                    action,
+                    pull_request: {
+                        number: 1,
+                        title: "non standard commit message",
+                        user: { login: "user-a" }
+                    }
+                });
+
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/comments`)).toBeTruthy();
             });
 
-            test("Posts success status if commit message is correct", async() => {
+            test("Posts failure status if PR title is not correct even when the first commit message is correct", async () => {
                 mockSingleCommitWithMessage("feat: standard commit message");
-                const labelsScope = mockLabels(["feature"]);
 
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "success")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                    body: {
+                        state: "failure"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                await emitBotEvent(bot, { action });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(labelsScope.isDone()).toBeTruthy();
+                fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                    if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                        return false;
+                    }
+                    const body = JSON.parse(opts.body).body;
+
+                    expect(body).toMatchSnapshot();
+
+                    return true;
+                }, 200);
+
+                await emitBotEvent(bot, {
+                    action,
+                    pull_request: {
+                        number: 1,
+                        title: "non standard commit message",
+                        user: { login: "user-a" }
+                    }
+                });
             });
 
-            test("Posts success status if commit message beginning with `Revert`", async() => {
+            test("Posts success status if PR title is correct", async () => {
+                mockSingleCommitWithMessage("feat: standard commit message");
+                mockLabels(["feature"]);
+
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                    body: {
+                        state: "success"
+                    },
+                    matchPartialBody: true
+                }, 201);
+
+                await emitBotEvent(bot, {
+                    action,
+                    pull_request: {
+                        number: 1,
+                        title: "feat: standard commit message",
+                        user: { login: "user-a" }
+                    }
+                });
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/labels`)).toBeTruthy();
+            });
+
+            test("Posts success status if PR title is correct even when the first commit message is not correct", async () => {
+                mockSingleCommitWithMessage("non standard commit message");
+                mockLabels(["feature"]);
+
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                    body: {
+                        state: "success"
+                    },
+                    matchPartialBody: true
+                }, 201);
+
+                await emitBotEvent(bot, {
+                    action,
+                    pull_request: {
+                        number: 1,
+                        title: "feat: standard commit message",
+                        user: { login: "user-a" }
+                    }
+                });
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/labels`)).toBeTruthy();
+            });
+
+            test("Posts success status if PR title begins with `Revert`", async () => {
                 mockSingleCommitWithMessage("Revert \"chore: add test for commit tag Revert\"");
 
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "success")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                    body: {
+                        state: "success"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                await emitBotEvent(bot, { action });
-                expect(nockScope.isDone()).toBeTruthy();
+                await emitBotEvent(bot, {
+                    action,
+                    pull_request: {
+                        number: 1,
+                        title: "Revert \"chore: add test for commit tag Revert\"",
+                        user: { login: "user-a" }
+                    }
+                });
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
             });
 
-            test("Posts failure status if the commit message is longer than 72 chars and don't set labels", async() => {
-                mockSingleCommitWithMessage("feat!: standard commit message very very very long message and its beond 72");
+            test("Posts failure status if the PR title is longer than 72 chars and don't set labels", async () => {
+                mockSingleCommitWithMessage("feat!: standard commit message very very very long message and its beyond 72");
 
-                const labelsScope = mockLabels(["feature", "breaking"]);
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "failure")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                    body: {
+                        state: "failure"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                const nockScope2 = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/issues/1/comments", req => {
-                        expect(req.body).toMatchSnapshot();
-                        return true;
-                    })
-                    .reply(200);
+                fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                    if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                        return false;
+                    }
+                    const body = JSON.parse(opts.body).body;
 
-                await emitBotEvent(bot, { action });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(nockScope2.isDone()).toBeTruthy();
-                expect(labelsScope.isDone()).toBeFalsy();
+                    expect(body).toMatchSnapshot();
+
+                    return true;
+                }, 200);
+
+                await emitBotEvent(bot, {
+                    action,
+                    pull_request: {
+                        number: 1,
+                        title: "feat!: standard commit message very very very long message and its beyond 72",
+                        user: { login: "user-a" }
+                    }
+                });
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/comments`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/labels`)).toBeFalsy();
             });
 
-            test("Posts success status if the commit message is longer than 72 chars after the newline", async() => {
-                mockSingleCommitWithMessage(
-                    `fix: foo\n\n${"A".repeat(72)}`
-                );
-
-                const labelsScope = mockLabels(["bug"]);
-
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "success")
-                    .reply(201);
-
-                await emitBotEvent(bot, { action });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(labelsScope.isDone()).toBeTruthy();
-            });
-
-            test("Posts success status if there are multiple commit messages and the title is valid", async() => {
+            test("Posts success status if there are multiple commit messages and the title is valid", async () => {
                 mockMultipleCommits();
 
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/second-sha", req => req.state === "success")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/second-sha`,
+                    body: {
+                        state: "success"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                const labelsScope = mockLabels(["feature"]);
+                mockLabels(["feature"]);
 
                 await emitBotEvent(bot, { action, pull_request: { number: 1, title: "feat: foo" } });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(labelsScope.isDone()).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/second-sha`)).toBeTruthy();
             });
 
-            test("Posts failure status if there are multiple commit messages and the title is invalid", async() => {
+            test("Posts failure status if there are multiple commit messages and the title is invalid", async () => {
                 mockMultipleCommits();
 
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/second-sha", req => req.state === "failure")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/second-sha`,
+                    body: {
+                        state: "failure"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                const nockScope2 = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/issues/1/comments", req => {
-                        expect(req.body).toMatchSnapshot();
-                        return true;
-                    })
-                    .reply(200);
+                fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                    if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                        return false;
+                    }
+                    const body = JSON.parse(opts.body).body;
+
+                    expect(body).toMatchSnapshot();
+
+                    return true;
+                }, 200);
 
                 await emitBotEvent(bot, { action, pull_request: { number: 1, title: "foo", user: { login: "user-a" } } });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(nockScope2.isDone()).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/second-sha`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/comments`)).toBeTruthy();
             });
 
-            test("Posts failure status if there are multiple commit messages and the title is too long", async() => {
+            test("Posts failure status if there are multiple commit messages and the title is too long", async () => {
                 mockMultipleCommits();
 
-                const nockScope = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/statuses/second-sha", req => req.state === "failure")
-                    .reply(201);
+                fetchMock.mockGlobal().post({
+                    url: `${API_ROOT}/repos/test/repo-test/statuses/second-sha`,
+                    body: {
+                        state: "failure"
+                    },
+                    matchPartialBody: true
+                }, 201);
 
-                const nockScope2 = nock("https://api.github.com")
-                    .post("/repos/test/repo-test/issues/1/comments", req => {
-                        expect(req.body).toMatchSnapshot();
-                        return true;
-                    })
-                    .reply(200);
+                fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                    if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                        return false;
+                    }
+                    const body = JSON.parse(opts.body).body;
+
+                    expect(body).toMatchSnapshot();
+
+                    return true;
+                }, 200);
 
                 await emitBotEvent(bot, { action, pull_request: { number: 1, title: `feat: ${"A".repeat(72)}`, user: { login: "user-a" } } });
-                expect(nockScope.isDone()).toBeTruthy();
-                expect(nockScope2.isDone()).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/second-sha`)).toBeTruthy();
+                expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/comments`)).toBeTruthy();
             });
 
             // Tests for invalid or malformed tag prefixes
@@ -266,42 +429,58 @@ describe("commit-message", () => {
             ].forEach(prefix => {
                 const message = `${prefix}foo`;
 
-                test(`Posts failure status if the commit message has invalid tag prefix: "${prefix}"`, async() => {
+                test(`Posts failure status if the PR title has invalid tag prefix: "${prefix}"`, async () => {
                     mockSingleCommitWithMessage(message);
 
-                    const nockScope = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "failure")
-                        .reply(201);
+                    fetchMock.mockGlobal().post({
+                        url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                        body: {
+                            state: "failure"
+                        },
+                        matchPartialBody: true
+                    }, 201);
 
-                    const nockScope2 = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/issues/1/comments", req => {
-                            expect(req.body).toMatchSnapshot();
-                            return true;
-                        })
-                        .reply(200);
+                    fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                        if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                            return false;
+                        }
+                        const body = JSON.parse(opts.body).body;
 
-                    await emitBotEvent(bot, { action });
-                    expect(nockScope.isDone()).toBeTruthy();
-                    expect(nockScope2.isDone()).toBeTruthy();
-                });
+                        expect(body).toMatchSnapshot();
 
-                test(`Posts failure status if PR with multiple commits has invalid tag prefix in the title: "${prefix}"`, async() => {
-                    mockMultipleCommits();
-
-                    const nockScope = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/statuses/second-sha", req => req.state === "failure")
-                        .reply(201);
-
-                    const nockScope2 = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/issues/1/comments", req => {
-                            expect(req.body).toMatchSnapshot();
-                            return true;
-                        })
-                        .reply(200);
+                        return true;
+                    }, 200);
 
                     await emitBotEvent(bot, { action, pull_request: { number: 1, title: message, user: { login: "user-a" } } });
-                    expect(nockScope.isDone()).toBeTruthy();
-                    expect(nockScope2.isDone()).toBeTruthy();
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/comments`)).toBeTruthy();
+                });
+
+                test(`Posts failure status if PR with multiple commits has invalid tag prefix in the title: "${prefix}"`, async () => {
+                    mockMultipleCommits();
+
+                    fetchMock.mockGlobal().post({
+                        url: `${API_ROOT}/repos/test/repo-test/statuses/second-sha`,
+                        body: {
+                            state: "failure"
+                        },
+                        matchPartialBody: true
+                    }, 201);
+
+                    fetchMock.mockGlobal().post(({ args: [url, opts] }) => {
+                        if (url !== `${API_ROOT}/repos/test/repo-test/issues/1/comments`) {
+                            return false;
+                        }
+                        const body = JSON.parse(opts.body).body;
+
+                        expect(body).toMatchSnapshot();
+
+                        return true;
+                    }, 200);
+
+                    await emitBotEvent(bot, { action, pull_request: { number: 1, title: message, user: { login: "user-a" } } });
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/second-sha`)).toBeTruthy();
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/comments`)).toBeTruthy();
                 });
             });
 
@@ -309,35 +488,43 @@ describe("commit-message", () => {
             TAG_LABELS.forEach((labels, prefix) => {
                 const message = `${prefix} foo`;
 
-                test(`Posts success status if the commit message has valid tag prefix: "${prefix}"`, async() => {
+                test(`Posts success status if the PR title has valid tag prefix: "${prefix}"`, async () => {
                     mockSingleCommitWithMessage(message);
 
-                    const labelsScope = mockLabels(labels);
-                    const nockScope = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "success")
-                        .reply(201);
+                    mockLabels(labels);
+                    fetchMock.mockGlobal().post({
+                        url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                        body: {
+                            state: "success"
+                        },
+                        matchPartialBody: true
+                    }, 201);
 
-                    await emitBotEvent(bot, { action });
-                    expect(nockScope.isDone()).toBeTruthy();
-                    expect(labelsScope.isDone()).toBeTruthy();
+                    await emitBotEvent(bot, { action, pull_request: { number: 1, title: message, user: { login: "user-a" } } });
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/labels`)).toBeTruthy();
                 });
 
-                test(`Posts success status if PR with multiple commits has valid tag prefix in the title: "${prefix}"`, async() => {
+                test(`Posts success status if PR with multiple commits has valid tag prefix in the title: "${prefix}"`, async () => {
                     mockMultipleCommits();
 
-                    const nockScope = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/statuses/second-sha", req => req.state === "success")
-                        .reply(201);
+                    fetchMock.mockGlobal().post({
+                        url: `${API_ROOT}/repos/test/repo-test/statuses/second-sha`,
+                        body: {
+                            state: "success"
+                        },
+                        matchPartialBody: true
+                    }, 201);
 
-                    const labelsScope = mockLabels(labels);
+                    mockLabels(labels);
 
                     await emitBotEvent(bot, { action, pull_request: { number: 1, title: message } });
-                    expect(nockScope.isDone()).toBeTruthy();
-                    expect(labelsScope.isDone()).toBeTruthy();
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/second-sha`)).toBeTruthy();
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/issues/1/labels`)).toBeTruthy();
                 });
             });
 
-            test("Does not post a status if the repository is excluded", async() => {
+            test("Does not post a status if the repository is excluded", async () => {
                 await emitBotEvent(bot, {
                     action: "opened",
                     repository: {
@@ -355,14 +542,19 @@ describe("commit-message", () => {
                 "Revert \"Very long commit message with lots and lots of characters (more than 72!)\"",
                 "Revert \"blah\"\n\nbaz"
             ].forEach(message => {
-                test("Posts a success status", async() => {
-                    const nockScope = nock("https://api.github.com")
-                        .post("/repos/test/repo-test/statuses/first-sha", req => req.state === "success")
-                        .reply(201);
-
+                test("Posts a success status", async () => {
                     mockSingleCommitWithMessage(message);
-                    await emitBotEvent(bot, { action, pull_request: { number: 1, title: message.replace(/\n[\s\S]*/, "") } });
-                    expect(nockScope.isDone()).toBe(true);
+
+                    fetchMock.mockGlobal().post({
+                        url: `${API_ROOT}/repos/test/repo-test/statuses/first-sha`,
+                        body: {
+                            state: "success"
+                        },
+                        matchPartialBody: true
+                    }, 201);
+
+                    await emitBotEvent(bot, { action, pull_request: { number: 1, title: message.replace(/\n[\s\S]*/u, "") } });
+                    expect(fetchMock.callHistory.called(`${API_ROOT}/repos/test/repo-test/statuses/first-sha`)).toBeTruthy();
                 });
             });
         });

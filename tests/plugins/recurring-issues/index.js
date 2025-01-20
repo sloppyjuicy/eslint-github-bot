@@ -1,9 +1,26 @@
+/**
+ * @fileoverview Tests for recurring-issues plugin.
+ * @author Nicholas C. Zakas
+ */
 "use strict";
 
+//-----------------------------------------------------------------------------
+// Requirements
+//-----------------------------------------------------------------------------
+
 const { recurringIssues } = require("../../../src/plugins/index");
-const nock = require("nock");
-const probot = require("probot");
-const GitHubApi = require("@octokit/rest");
+const { Probot, ProbotOctokit } = require("probot");
+const { default: fetchMock } = require("fetch-mock");
+
+//-----------------------------------------------------------------------------
+// Helpers
+//-----------------------------------------------------------------------------
+
+const API_ROOT = "https://api.github.com";
+
+//-----------------------------------------------------------------------------
+// Tests
+//-----------------------------------------------------------------------------
 
 describe("recurring-issues", () => {
     let issueWasCreated;
@@ -11,75 +28,71 @@ describe("recurring-issues", () => {
 
     /**
      * Runs the bot with the given arguments, setting up fixtures and running the webhook listener
-     * @param {string} issueTitle The title of the existing issue which was closed
-     * @param {string[]} labelNames The labels of the issue which was closed
-     * @param {string[]} eventTypes The events that have occurred for the issue
+     * @param {Object} options Configure API responses the bot will see
+     * @param {string} options.issueTitle The title of the existing issue which was closed
+     * @param {string[]} options.labelNames The labels of the issue which was closed
+     * @param {string[]} options.eventTypes The events that have occurred for the issue
      * @returns {Promise<void>} A Promise that fulfills after the webhook action is complete
      */
     function runBot({ issueTitle, labelNames, eventTypes }) {
         issueWasCreated = false;
 
-        const bot = new probot.Application({
-            id: "test",
-            cert: "test",
-            cache: {
-                wrap: () => Promise.resolve({ data: { token: "test" } })
-            }
+        const bot = new Probot({
+            appId: 1,
+            githubToken: "test",
+            Octokit: ProbotOctokit.defaults(instanceOptions => ({
+                ...instanceOptions,
+                throttle: { enabled: false },
+                retry: { enabled: false }
+            }))
         });
 
-        bot.auth = () => new GitHubApi();
         recurringIssues(bot);
 
         const ORGANIZATION_NAME = "test";
         const TEAM_ID = 55;
+        const TEAM_SLUG = "eslint-tsc";
 
-        nock("https://api.github.com")
-            .get(`/repos/${ORGANIZATION_NAME}/repo-test/issues/1/events?per_page=100`)
-            .reply(200, eventTypes.map(type => ({ event: type })));
+        fetchMock.mockGlobal().get(`${API_ROOT}/repos/${ORGANIZATION_NAME}/repo-test/issues/1/events?per_page=100`, eventTypes.map(type => ({ event: type })));
 
-        nock("https://api.github.com")
-            .post("/repos/test/repo-test/issues")
-            .reply(200, (uri, requestBody) => {
-                issueWasCreated = true;
-                issue = JSON.parse(requestBody);
-                return {};
-            });
-
-        nock("https://api.github.com")
-            .get(`/orgs/${ORGANIZATION_NAME}/teams?per_page=100`)
-            .reply(200, [
-                {
-                    id: TEAM_ID,
-                    slug: "eslint-tsc"
+        fetchMock.mockGlobal().post(`${API_ROOT}/repos/${ORGANIZATION_NAME}/repo-test/issues`, ({ options }) => {
+            issueWasCreated = true;
+            issue = JSON.parse(options.body);
+            return {
+                status: 200,
+                body: {
+                    issue_number: 2
                 }
-            ]);
+            };
+        });
 
-        nock("https://api.github.com")
-            .get(`/teams/${TEAM_ID}/members?per_page=100`)
-            .reply(200, [
-                {
-                    id: 1,
-                    login: "user1"
-                },
-                {
-                    id: 2,
-                    login: "user2"
-                }
-            ]);
+        fetchMock.mockGlobal().get(`${API_ROOT}/orgs/${ORGANIZATION_NAME}/teams?per_page=100`, [
+            {
+                id: TEAM_ID,
+                slug: "eslint-tsc"
+            }
+        ]);
 
-        nock("https://api.github.com")
-            .get("/user/1")
-            .reply(200, {
-                login: "user1",
-                name: "User One"
-            });
+        fetchMock.mockGlobal().get(`${API_ROOT}/orgs/${ORGANIZATION_NAME}/teams/${TEAM_SLUG}/members?per_page=100`, [
+            {
+                id: 1,
+                login: "user1"
+            },
+            {
+                id: 2,
+                login: "user2"
+            }
+        ]);
 
-        nock("https://api.github.com")
-            .get("/user/2")
-            .reply(200, {
-                login: "user2",
-                name: "User Two"
-            });
+        fetchMock.mockGlobal().get(`${API_ROOT}/users/user1`, {
+            login: "user1",
+            name: "User One"
+        });
+
+        fetchMock.mockGlobal().get(`${API_ROOT}/users/user2`, {
+            login: "user2",
+            name: "User Two"
+        });
 
         return bot.receive({
             name: "issues",
@@ -104,11 +117,13 @@ describe("recurring-issues", () => {
     }
 
     afterEach(() => {
-        nock.cleanAll();
+        fetchMock.unmockGlobal();
+        fetchMock.removeRoutes();
+        fetchMock.clearHistory();
     });
 
     describe("when an issue does not have the release label", () => {
-        test("ignores the issue", async() => {
+        test("ignores the issue", async () => {
             await runBot({
                 issueTitle: "Scheduled release for October 27th, 2017",
                 labelNames: ["foo"],
@@ -120,7 +135,7 @@ describe("recurring-issues", () => {
     });
 
     describe("when an issue has already been closed and reopened", () => {
-        test("ignores the issue", async() => {
+        test("ignores the issue", async () => {
             await runBot({
                 issueTitle: "Scheduled release for October 27th, 2017",
                 labelNames: ["release"],
@@ -132,7 +147,7 @@ describe("recurring-issues", () => {
     });
 
     describe("when an issue has an invalid title", () => {
-        test("ignores the issue", async() => {
+        test("ignores the issue", async () => {
             await runBot({
                 issueTitle: "Foo bar!",
                 labelNames: ["release"],
@@ -144,7 +159,7 @@ describe("recurring-issues", () => {
     });
 
     describe("when an issue has a parseable title, has the release label, and has never been closed", () => {
-        test("creates a new issue", async() => {
+        test("creates a new issue", async () => {
             await runBot({
                 issueTitle: "Scheduled release for October 27th, 2017",
                 labelNames: ["release"],
@@ -158,7 +173,7 @@ describe("recurring-issues", () => {
     });
 
     describe("when an issue has a parseable title, has the tsc meeting label, and has never been closed", () => {
-        test("creates a new issue", async() => {
+        test("creates a new issue", async () => {
             await runBot({
                 issueTitle: "TSC meeting 26-October-2017",
                 labelNames: ["tsc meeting"],

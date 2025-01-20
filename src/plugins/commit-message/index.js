@@ -10,19 +10,24 @@
 // Requirements
 //-----------------------------------------------------------------------------
 
-const { getCommitMessageForPR } = require("../utils");
 const commentMessage = require("./createMessage");
 const { TAG_LABELS } = require("./util");
+
+//-----------------------------------------------------------------------------
+// Type Definitions
+//-----------------------------------------------------------------------------
+
+/** @typedef {import("probot").Context} ProbotContext */
 
 //-----------------------------------------------------------------------------
 // Helpers
 //-----------------------------------------------------------------------------
 
-const TAG_REGEX = /^(?:feat|build|chore|docs|fix|refactor|test|ci|perf)!?: /;
+const TAG_REGEX = /^(?:feat|build|chore|docs|fix|refactor|test|ci|perf)!?: /u;
 
-const TAG_SPACE_REGEX = /^(?:[a-z]+!?: )/;
+const TAG_SPACE_REGEX = /^(?:[a-z]+!?: )/u;
 
-const LOWERCASE_TAG_REGEX = /^[a-z]/;
+const LOWERCASE_TAG_REGEX = /^[a-z]/u;
 
 const MESSAGE_LENGTH_LIMIT = 72;
 
@@ -37,12 +42,12 @@ const EXCLUDED_REPOSITORY_NAMES = new Set([
 
 /**
  * Apply different checks on the commit message
- * @param {string} message - commit message
+ * @param {string} message commit message
  * @returns {boolean} `true` if the commit message is valid
  * @private
  */
 function getCommitMessageErrors(message) {
-    const commitTitle = message.split(/\r?\n/)[0];
+    const commitTitle = message.split(/\r?\n/u)[0];
     const errors = [];
 
     if (message.startsWith("Revert \"")) {
@@ -72,12 +77,12 @@ function getCommitMessageErrors(message) {
 
 /**
  * Apply different checks on the commit message
- * @param {string} message - commit message
+ * @param {string} message commit message
  * @returns {Array<string>} The labels to add to the PR.
  * @private
  */
 function getCommitMessageLabels(message) {
-    const commitTitle = message.split(/\r?\n/)[0];
+    const commitTitle = message.split(/\r?\n/u)[0];
     const [tag] = commitTitle.match(TAG_REGEX) || [""];
 
     return TAG_LABELS.get(tag.trim());
@@ -85,8 +90,8 @@ function getCommitMessageLabels(message) {
 
 /**
  * If the first commit message is not legal then it adds a comment
- * @param {Object} context - context given by the probot
- * @returns {Promise.<void>} promise
+ * @param {ProbotContext} context context given by the probot
+ * @returns {Promise<void>} promise
  * @private
  */
 async function processCommitMessage(context) {
@@ -97,51 +102,47 @@ async function processCommitMessage(context) {
      * message of that commit. If the PR has more than one commit, this
      * is the title of the PR.
      */
-    const { payload, github } = context;
+    const { payload, octokit } = context;
 
     if (EXCLUDED_REPOSITORY_NAMES.has(payload.repository.name)) {
         return;
     }
 
-    const allCommits = await github.pullRequests.listCommits(context.issue());
-    const messageToCheck = getCommitMessageForPR(allCommits.data, payload.pull_request);
+    const allCommits = await octokit.pulls.listCommits(context.pullRequest());
+    const messageToCheck = payload.pull_request.title;
     const errors = getCommitMessageErrors(messageToCheck);
     let description;
     let state;
 
     if (errors.length === 0) {
         state = "success";
-        description = allCommits.data.length === 1
-            ? "Commit message follows guidelines"
-            : "PR title follows commit message guidelines";
+        description = "PR title follows commit message guidelines";
 
         const labels = getCommitMessageLabels(messageToCheck);
 
         if (labels) {
-            await context.github.issues.addLabels(context.issue({ labels }));
+            await context.octokit.issues.addLabels(context.issue({ labels }));
         }
 
     } else {
         state = "failure";
-        description = allCommits.data.length === 1
-            ? "Commit message doesn't follow guidelines"
-            : "PR title doesn't follow commit message guidelines";
+        description = "PR title doesn't follow commit message guidelines";
     }
 
-    // only check first commit message
-    await github.repos.createStatus(
+    // create status on the last commit
+    await octokit.repos.createCommitStatus(
         context.repo({
-            sha: allCommits.data[allCommits.data.length - 1].sha,
+            sha: allCommits.data.at(-1).sha,
             state,
-            target_url: "https://github.com/eslint/eslint-github-bot/blob/master/docs/commit-message-check.md",
+            target_url: "https://github.com/eslint/eslint-github-bot/blob/main/docs/commit-message-check.md",
             description,
             context: "commit-message"
         })
     );
 
     if (state === "failure") {
-        await github.issues.createComment(context.issue({
-            body: commentMessage(errors, allCommits.data.length !== 1, payload.pull_request.user.login)
+        await octokit.issues.createComment(context.issue({
+            body: commentMessage(errors, payload.pull_request.user.login)
         }));
     }
 
